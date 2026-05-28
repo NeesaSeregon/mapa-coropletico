@@ -1,0 +1,18 @@
+<div #contenedor class="mapa-contenedor">
+  @if (tooltip().visible) {
+    <div
+      class="tooltip"
+      [style.left.px]="tooltip().x + 14"
+      [style.top.px]="tooltip().y - 36"
+    >
+      {{ tooltip().texto }}
+    </div>
+  }
+</div>
+
+@if (provinciaSeleccionada()) {
+  <div class="info-panel">
+    <span class="info-nombre">{{ provinciaSeleccionada() }}</span>
+    <button class="btn-cerrar" (click)="provinciaSeleccionada.set(null)">✕</button>
+  </div>
+}
