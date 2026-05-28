@@ -58,6 +58,34 @@
   }
 }
 
+.cargando {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: rgba(245, 247, 251, 0.85);
+  backdrop-filter: blur(3px);
+  z-index: 50;
+  font-size: 14px;
+  color: #555;
+}
+
+.cargando-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #c8d4f0;
+  border-top-color: #1a1a2e;
+  border-radius: 50%;
+  animation: girar 0.7s linear infinite;
+}
+
+@keyframes girar {
+  to { transform: rotate(360deg); }
+}
+
 .tooltip {
   position: absolute;
   background: rgba(10, 10, 30, 0.85);

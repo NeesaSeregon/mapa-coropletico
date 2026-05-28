@@ -4,7 +4,7 @@ import * as topojson from 'topojson-client';
 import { geoConicConformalSpain } from 'd3-composite-projections';
 import type { Topology, GeometryCollection } from 'topojson-specification';
 
-export type ModoVista = 'provincias' | 'comunidades';
+export type ModoVista = 'provincias' | 'comunidades' | 'municipios';
 
 interface TooltipState {
   visible: boolean;
@@ -17,9 +17,14 @@ interface PropiedadesRegion {
   name: string;
 }
 
-type TopoEspana = Topology<{
+type TopoProvincias = Topology<{
   provinces: GeometryCollection<PropiedadesRegion>;
   autonomous_regions: GeometryCollection<PropiedadesRegion>;
+}>;
+
+type TopoMunicipios = Topology<{
+  municipalities: GeometryCollection<PropiedadesRegion>;
+  provinces: GeometryCollection<PropiedadesRegion>;
 }>;
 
 @Component({
@@ -31,11 +36,13 @@ export class MapaComponent {
   private contenedor = viewChild.required<ElementRef<HTMLDivElement>>('contenedor');
 
   modoVista = signal<ModoVista>('provincias');
+  cargando = signal(false);
   tooltip = signal<TooltipState>({ visible: false, texto: '', x: 0, y: 0 });
   zonaSeleccionada = signal<string | null>(null);
 
   private mapListo = signal(false);
-  private topoCache: TopoEspana | null = null;
+  private topoCache: TopoProvincias | null = null;
+  private topoMunicipiosCache: TopoMunicipios | null = null;
 
   private readonly datosProvincias: Record<string, number> = {
     'A Coruña': 1.12, 'Araba/Álava': 0.33, 'Albacete': 0.39, 'Alacant/Alicante': 1.88,
@@ -55,25 +62,35 @@ export class MapaComponent {
   };
 
   private readonly datosComunidades: Record<string, number> = {
-    'Andalucía': 8.50,
-    'Aragón': 1.33,
-    'Principado de Asturias': 1.02,
-    'Illes Balears': 1.17,
-    'Canarias': 2.17,
-    'Cantabria': 0.58,
-    'Castilla-La Mancha': 2.10,
-    'Castilla y León': 2.39,
-    'Cataluña/Catalunya': 7.80,
-    'Comunitat Valenciana': 5.06,
-    'Extremadura': 1.07,
-    'Galicia': 2.70,
-    'La Rioja': 0.32,
-    'Comunidad de Madrid': 6.75,
-    'Región de Murcia': 1.51,
-    'Comunidad Foral de Navarra': 0.66,
-    'País Vasco/Euskadi': 2.22,
-    'Ciudad Autónoma de Ceuta': 0.08,
-    'Ciudad Autónoma de Melilla': 0.08
+    'Andalucía': 8.50, 'Aragón': 1.33, 'Principado de Asturias': 1.02,
+    'Illes Balears': 1.17, 'Canarias': 2.17, 'Cantabria': 0.58,
+    'Castilla-La Mancha': 2.10, 'Castilla y León': 2.39, 'Cataluña/Catalunya': 7.80,
+    'Comunitat Valenciana': 5.06, 'Extremadura': 1.07, 'Galicia': 2.70,
+    'La Rioja': 0.32, 'Comunidad de Madrid': 6.75, 'Región de Murcia': 1.51,
+    'Comunidad Foral de Navarra': 0.66, 'País Vasco/Euskadi': 2.22,
+    'Ciudad Autónoma de Ceuta': 0.08, 'Ciudad Autónoma de Melilla': 0.08
+  };
+
+  // Los dos primeros dígitos del id INE de cada municipio identifican su provincia
+  private readonly codigosProvincias: Record<string, string> = {
+    '01': 'Araba/Álava',  '02': 'Albacete',        '03': 'Alacant/Alicante',
+    '04': 'Almería',      '05': 'Ávila',            '06': 'Badajoz',
+    '07': 'Illes Balears','08': 'Barcelona',        '09': 'Burgos',
+    '10': 'Cáceres',      '11': 'Cádiz',            '12': 'Castelló/Castellón',
+    '13': 'Ciudad Real',  '14': 'Córdoba',          '15': 'A Coruña',
+    '16': 'Cuenca',       '17': 'Girona',           '18': 'Granada',
+    '19': 'Guadalajara',  '20': 'Gipuzkoa',         '21': 'Huelva',
+    '22': 'Huesca',       '23': 'Jaén',             '24': 'León',
+    '25': 'Lleida',       '26': 'La Rioja',         '27': 'Lugo',
+    '28': 'Madrid',       '29': 'Málaga',           '30': 'Murcia',
+    '31': 'Navarra/Nafarroa', '32': 'Ourense',     '33': 'Asturias',
+    '34': 'Palencia',     '35': 'Las Palmas',       '36': 'Pontevedra',
+    '37': 'Salamanca',    '38': 'Santa Cruz de Tenerife', '39': 'Cantabria',
+    '40': 'Segovia',      '41': 'Sevilla',          '42': 'Soria',
+    '43': 'Tarragona',    '44': 'Teruel',           '45': 'Toledo',
+    '46': 'Valencia/València', '47': 'Valladolid',  '48': 'Bizkaia',
+    '49': 'Zamora',       '50': 'Zaragoza',         '51': 'Ceuta',
+    '52': 'Melilla'
   };
 
   constructor() {
@@ -84,7 +101,7 @@ export class MapaComponent {
       if (this.mapListo()) {
         void this.renderizarMapa(modo);
       }
-    });
+    }, { allowSignalWrites: true });
   }
 
   cambiarModo(modo: ModoVista): void {
@@ -97,11 +114,19 @@ export class MapaComponent {
     const el = this.contenedor().nativeElement;
     d3.select(el).selectAll('svg').remove();
 
+    if (modo === 'municipios') {
+      await this.renderizarMunicipios(el);
+    } else {
+      await this.renderizarNivel(el, modo);
+    }
+  }
+
+  private async renderizarNivel(el: HTMLDivElement, modo: 'provincias' | 'comunidades'): Promise<void> {
     const ancho = el.clientWidth || 800;
     const alto = el.clientHeight || 500;
 
     if (!this.topoCache) {
-      this.topoCache = await d3.json<TopoEspana>('/assets/provinces.json') ?? null;
+      this.topoCache = await d3.json<TopoProvincias>('/assets/provinces.json') ?? null;
     }
     if (!this.topoCache) return;
 
@@ -155,11 +180,97 @@ export class MapaComponent {
       .attr('d', path);
   }
 
+  private async renderizarMunicipios(el: HTMLDivElement): Promise<void> {
+    this.cargando.set(true);
+    try {
+      const ancho = el.clientWidth || 800;
+      const alto = el.clientHeight || 500;
+
+      if (!this.topoMunicipiosCache) {
+        this.topoMunicipiosCache = await d3.json<TopoMunicipios>('/assets/municipalities.json') ?? null;
+      }
+      if (!this.topoMunicipiosCache) return;
+
+      const topo = this.topoMunicipiosCache;
+      const coleccion = topojson.feature(topo, topo.objects.municipalities);
+      const features = 'features' in coleccion ? coleccion.features : [];
+      const mallaProvincias = topojson.mesh(topo, topo.objects.provinces, (a, b) => a !== b);
+      const mallaMunicipios = topojson.mesh(topo, topo.objects.municipalities, (a, b) => a !== b);
+
+      const projection = geoConicConformalSpain();
+      projection.fitSize([ancho, alto], coleccion);
+      const path = d3.geoPath().projection(projection);
+
+      const maxValor = d3.max(Object.values(this.datosProvincias)) ?? 1;
+      const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxValor]);
+
+      const svg = d3.select(el)
+        .append('svg')
+        .attr('width', '100%')
+        .attr('height', '100%')
+        .attr('viewBox', `0 0 ${ancho} ${alto}`)
+        .attr('preserveAspectRatio', 'xMidYMid meet');
+
+      const g = svg.append('g');
+
+      g.selectAll<SVGPathElement, (typeof features)[number]>('.municipio')
+        .data(features)
+        .enter()
+        .append('path')
+        .attr('class', 'region municipio')
+        .attr('d', path)
+        .attr('fill', d => {
+          const codigo = String(d.id ?? '').slice(0, 2);
+          const nombreProv = this.codigosProvincias[codigo];
+          const valor = nombreProv ? this.datosProvincias[nombreProv] : undefined;
+          return valor != null ? colorScale(valor) : '#d0d0d0';
+        })
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 0.1)
+        .on('mouseover', (event: MouseEvent, d) => {
+          const codigo = String(d.id ?? '').slice(0, 2);
+          const nombreProv = this.codigosProvincias[codigo] ?? '';
+          const valor = this.datosProvincias[nombreProv];
+          const texto = valor != null
+            ? `${d.properties.name} · ${nombreProv}: ${valor.toFixed(2)}M hab.`
+            : d.properties.name;
+          this.tooltip.set({ visible: true, texto, x: event.offsetX, y: event.offsetY });
+          d3.select(event.currentTarget as Element).attr('stroke', '#1a1a2e').attr('stroke-width', 0.8);
+        })
+        .on('mousemove', (event: MouseEvent) => this.alMover(event))
+        .on('mouseout', () => {
+          this.tooltip.update(t => ({ ...t, visible: false }));
+          d3.selectAll<SVGPathElement, unknown>('.municipio')
+            .attr('stroke', '#fff')
+            .attr('stroke-width', 0.1);
+        })
+        .on('click', (_event: MouseEvent, d) => this.alHacerClick(d));
+
+      // Bordes municipales muy finos
+      g.append('path')
+        .datum(mallaMunicipios)
+        .attr('fill', 'none')
+        .attr('stroke', 'rgba(255,255,255,0.35)')
+        .attr('stroke-width', 0.15)
+        .attr('d', path);
+
+      // Bordes provinciales encima, más visibles
+      g.append('path')
+        .datum(mallaProvincias)
+        .attr('fill', 'none')
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 0.9)
+        .attr('d', path);
+
+    } finally {
+      this.cargando.set(false);
+    }
+  }
+
   private alHover(event: MouseEvent, d: { properties: PropiedadesRegion }, datos: Record<string, number>): void {
     const nombre = d.properties.name;
     const valor = datos[nombre];
     const texto = valor != null ? `${nombre}: ${valor.toFixed(2)}M hab.` : nombre;
-
     this.tooltip.set({ visible: true, texto, x: event.offsetX, y: event.offsetY });
     d3.select(event.currentTarget as Element).attr('stroke', '#1a1a2e').attr('stroke-width', 1.5);
   }

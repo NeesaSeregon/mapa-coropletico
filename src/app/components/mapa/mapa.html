@@ -13,9 +13,23 @@
   >
     Comunidades Autónomas
   </button>
+  <button
+    class="btn-modo"
+    [class.activo]="modoVista() === 'municipios'"
+    (click)="cambiarModo('municipios')"
+  >
+    Municipios
+  </button>
 </div>
 
 <div #contenedor class="mapa-contenedor">
+  @if (cargando()) {
+    <div class="cargando">
+      <div class="cargando-spinner"></div>
+      <span>Cargando municipios…</span>
+    </div>
+  }
+
   @if (tooltip().visible) {
     <div
       class="tooltip"
