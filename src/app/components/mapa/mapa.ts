@@ -121,6 +121,12 @@ export class MapaComponent {
     }
   }
 
+  private crearEscalaColor(datos: Record<string, number>): d3.ScaleQuantile<string, never> {
+    return d3.scaleQuantile<string>()
+      .domain(Object.values(datos))
+      .range([...d3.schemeBlues[7]]);
+  }
+
   private async renderizarNivel(el: HTMLDivElement, modo: 'provincias' | 'comunidades'): Promise<void> {
     const ancho = el.clientWidth || 800;
     const alto = el.clientHeight || 500;
@@ -143,8 +149,7 @@ export class MapaComponent {
     projection.fitSize([ancho, alto], coleccion);
     const path = d3.geoPath().projection(projection);
 
-    const maxValor = d3.max(Object.values(datos)) ?? 1;
-    const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxValor]);
+    const colorScale = this.crearEscalaColor(datos);
 
     const svg = d3.select(el)
       .append('svg')
@@ -163,7 +168,7 @@ export class MapaComponent {
       .attr('d', path)
       .attr('fill', d => {
         const valor = datos[d.properties.name];
-        return valor != null ? colorScale(valor) : '#d0d0d0';
+        return valor != null ? (colorScale(valor) ?? '#d0d0d0') : '#d0d0d0';
       })
       .attr('stroke', '#fff')
       .attr('stroke-width', 0.5)
@@ -201,8 +206,7 @@ export class MapaComponent {
       projection.fitSize([ancho, alto], coleccion);
       const path = d3.geoPath().projection(projection);
 
-      const maxValor = d3.max(Object.values(this.datosProvincias)) ?? 1;
-      const colorScale = d3.scaleSequential(d3.interpolateBlues).domain([0, maxValor]);
+      const colorScale = this.crearEscalaColor(this.datosProvincias);
 
       const svg = d3.select(el)
         .append('svg')
@@ -223,7 +227,7 @@ export class MapaComponent {
           const codigo = String(d.id ?? '').slice(0, 2);
           const nombreProv = this.codigosProvincias[codigo];
           const valor = nombreProv ? this.datosProvincias[nombreProv] : undefined;
-          return valor != null ? colorScale(valor) : '#d0d0d0';
+          return valor != null ? (colorScale(valor) ?? '#d0d0d0') : '#d0d0d0';
         })
         .attr('stroke', '#fff')
         .attr('stroke-width', 0.1)
