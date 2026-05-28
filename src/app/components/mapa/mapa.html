@@ -1,3 +1,20 @@
+<div class="controles">
+  <button
+    class="btn-modo"
+    [class.activo]="modoVista() === 'provincias'"
+    (click)="cambiarModo('provincias')"
+  >
+    Provincias
+  </button>
+  <button
+    class="btn-modo"
+    [class.activo]="modoVista() === 'comunidades'"
+    (click)="cambiarModo('comunidades')"
+  >
+    Comunidades Autónomas
+  </button>
+</div>
+
 <div #contenedor class="mapa-contenedor">
   @if (tooltip().visible) {
     <div
@@ -10,9 +27,9 @@
   }
 </div>
 
-@if (provinciaSeleccionada()) {
+@if (zonaSeleccionada()) {
   <div class="info-panel">
-    <span class="info-nombre">{{ provinciaSeleccionada() }}</span>
-    <button class="btn-cerrar" (click)="provinciaSeleccionada.set(null)">✕</button>
+    <span class="info-nombre">{{ zonaSeleccionada() }}</span>
+    <button class="btn-cerrar" (click)="zonaSeleccionada.set(null)">✕</button>
   </div>
 }
