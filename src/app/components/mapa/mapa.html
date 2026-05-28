@@ -20,6 +20,16 @@
   >
     Municipios
   </button>
+
+  <span class="controles-separador"></span>
+
+  <button class="btn-zoom-reset" title="Restablecer zoom" (click)="resetearZoom()">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+      <circle cx="11" cy="11" r="8"/>
+      <path d="M21 21l-4.35-4.35M11 8v6M8 11h6"/>
+    </svg>
+    Reset zoom
+  </button>
 </div>
 
 <div #contenedor class="mapa-contenedor">

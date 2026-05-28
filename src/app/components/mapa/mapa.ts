@@ -44,6 +44,9 @@ export class MapaComponent {
   private topoCache: TopoProvincias | null = null;
   private topoMunicipiosCache: TopoMunicipios | null = null;
 
+  private svgRef: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
+  private zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
+
   private readonly datosProvincias: Record<string, number> = {
     'A Coruña': 1.12, 'Araba/Álava': 0.33, 'Albacete': 0.39, 'Alacant/Alicante': 1.88,
     'Almería': 0.73, 'Asturias': 1.02, 'Ávila': 0.16, 'Badajoz': 0.68,
@@ -71,7 +74,6 @@ export class MapaComponent {
     'Ciudad Autónoma de Ceuta': 0.08, 'Ciudad Autónoma de Melilla': 0.08
   };
 
-  // Los dos primeros dígitos del id INE de cada municipio identifican su provincia
   private readonly codigosProvincias: Record<string, string> = {
     '01': 'Araba/Álava',  '02': 'Albacete',        '03': 'Alacant/Alicante',
     '04': 'Almería',      '05': 'Ávila',            '06': 'Badajoz',
@@ -110,21 +112,85 @@ export class MapaComponent {
     this.modoVista.set(modo);
   }
 
-  private async renderizarMapa(modo: ModoVista): Promise<void> {
-    const el = this.contenedor().nativeElement;
-    d3.select(el).selectAll('svg').remove();
-
-    if (modo === 'municipios') {
-      await this.renderizarMunicipios(el);
-    } else {
-      await this.renderizarNivel(el, modo);
+  resetearZoom(): void {
+    if (this.svgRef && this.zoomBehavior) {
+      this.svgRef.transition().duration(400)
+        .call(this.zoomBehavior.transform, d3.zoomIdentity);
     }
+  }
+
+  private posicionRelativa(event: MouseEvent): { x: number; y: number } {
+    const rect = this.contenedor().nativeElement.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
   private crearEscalaColor(datos: Record<string, number>): d3.ScaleQuantile<string, never> {
     return d3.scaleQuantile<string>()
       .domain(Object.values(datos))
       .range([...d3.schemeBlues[7]]);
+  }
+
+  private crearSvgBase(
+    el: HTMLDivElement,
+    ancho: number,
+    alto: number,
+    maxZoom: number
+  ): {
+    svg: d3.Selection<SVGSVGElement, unknown, null, undefined>;
+    g: d3.Selection<SVGGElement, unknown, null, undefined>;
+  } {
+    const svg = d3.select<HTMLDivElement, unknown>(el)
+      .append<SVGSVGElement>('svg')
+      .attr('width', '100%')
+      .attr('height', '100%')
+      .attr('viewBox', `0 0 ${ancho} ${alto}`)
+      .attr('preserveAspectRatio', 'xMidYMid meet');
+
+    // Fondo blanco para que el área exterior al mapa sea limpia
+    svg.append('rect')
+      .attr('width', ancho)
+      .attr('height', alto)
+      .attr('fill', '#f5f7fb');
+
+    const g = svg.append('g');
+
+    const zoom = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.8, maxZoom])
+      .on('zoom', (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
+        g.attr('transform', event.transform.toString());
+      });
+
+    svg.call(zoom);
+    this.svgRef = svg;
+    this.zoomBehavior = zoom;
+
+    return { svg, g };
+  }
+
+  private dibujarBordesInset(
+    g: d3.Selection<SVGGElement, unknown, null, undefined>,
+    projection: ReturnType<typeof geoConicConformalSpain>
+  ): void {
+    const bordersPath = projection.getCompositionBorders();
+    g.append('path')
+      .attr('d', bordersPath)
+      .attr('fill', 'none')
+      .attr('stroke', '#999')
+      .attr('stroke-width', 0.8)
+      .attr('stroke-dasharray', '4,3');
+  }
+
+  private async renderizarMapa(modo: ModoVista): Promise<void> {
+    const el = this.contenedor().nativeElement;
+    d3.select(el).selectAll('svg').remove();
+    this.svgRef = null;
+    this.zoomBehavior = null;
+
+    if (modo === 'municipios') {
+      await this.renderizarMunicipios(el);
+    } else {
+      await this.renderizarNivel(el, modo);
+    }
   }
 
   private async renderizarNivel(el: HTMLDivElement, modo: 'provincias' | 'comunidades'): Promise<void> {
@@ -148,17 +214,9 @@ export class MapaComponent {
     const projection = geoConicConformalSpain();
     projection.fitSize([ancho, alto], coleccion);
     const path = d3.geoPath().projection(projection);
-
     const colorScale = this.crearEscalaColor(datos);
 
-    const svg = d3.select(el)
-      .append('svg')
-      .attr('width', '100%')
-      .attr('height', '100%')
-      .attr('viewBox', `0 0 ${ancho} ${alto}`)
-      .attr('preserveAspectRatio', 'xMidYMid meet');
-
-    const g = svg.append('g');
+    const { g } = this.crearSvgBase(el, ancho, alto, 12);
 
     g.selectAll<SVGPathElement, (typeof features)[number]>('.region')
       .data(features)
@@ -183,6 +241,8 @@ export class MapaComponent {
       .attr('stroke', '#fff')
       .attr('stroke-width', 0.5)
       .attr('d', path);
+
+    this.dibujarBordesInset(g, projection);
   }
 
   private async renderizarMunicipios(el: HTMLDivElement): Promise<void> {
@@ -205,17 +265,9 @@ export class MapaComponent {
       const projection = geoConicConformalSpain();
       projection.fitSize([ancho, alto], coleccion);
       const path = d3.geoPath().projection(projection);
-
       const colorScale = this.crearEscalaColor(this.datosProvincias);
 
-      const svg = d3.select(el)
-        .append('svg')
-        .attr('width', '100%')
-        .attr('height', '100%')
-        .attr('viewBox', `0 0 ${ancho} ${alto}`)
-        .attr('preserveAspectRatio', 'xMidYMid meet');
-
-      const g = svg.append('g');
+      const { g } = this.crearSvgBase(el, ancho, alto, 40);
 
       g.selectAll<SVGPathElement, (typeof features)[number]>('.municipio')
         .data(features)
@@ -238,7 +290,8 @@ export class MapaComponent {
           const texto = valor != null
             ? `${d.properties.name} · ${nombreProv}: ${valor.toFixed(2)}M hab.`
             : d.properties.name;
-          this.tooltip.set({ visible: true, texto, x: event.offsetX, y: event.offsetY });
+          const pos = this.posicionRelativa(event);
+          this.tooltip.set({ visible: true, texto, x: pos.x, y: pos.y });
           d3.select(event.currentTarget as Element).attr('stroke', '#1a1a2e').attr('stroke-width', 0.8);
         })
         .on('mousemove', (event: MouseEvent) => this.alMover(event))
@@ -250,7 +303,6 @@ export class MapaComponent {
         })
         .on('click', (_event: MouseEvent, d) => this.alHacerClick(d));
 
-      // Bordes municipales muy finos
       g.append('path')
         .datum(mallaMunicipios)
         .attr('fill', 'none')
@@ -258,13 +310,14 @@ export class MapaComponent {
         .attr('stroke-width', 0.15)
         .attr('d', path);
 
-      // Bordes provinciales encima, más visibles
       g.append('path')
         .datum(mallaProvincias)
         .attr('fill', 'none')
         .attr('stroke', '#fff')
         .attr('stroke-width', 0.9)
         .attr('d', path);
+
+      this.dibujarBordesInset(g, projection);
 
     } finally {
       this.cargando.set(false);
@@ -275,12 +328,14 @@ export class MapaComponent {
     const nombre = d.properties.name;
     const valor = datos[nombre];
     const texto = valor != null ? `${nombre}: ${valor.toFixed(2)}M hab.` : nombre;
-    this.tooltip.set({ visible: true, texto, x: event.offsetX, y: event.offsetY });
+    const pos = this.posicionRelativa(event);
+    this.tooltip.set({ visible: true, texto, x: pos.x, y: pos.y });
     d3.select(event.currentTarget as Element).attr('stroke', '#1a1a2e').attr('stroke-width', 1.5);
   }
 
   private alMover(event: MouseEvent): void {
-    this.tooltip.update(t => ({ ...t, x: event.offsetX, y: event.offsetY }));
+    const pos = this.posicionRelativa(event);
+    this.tooltip.update(t => ({ ...t, x: pos.x, y: pos.y }));
   }
 
   private alSalir(): void {
