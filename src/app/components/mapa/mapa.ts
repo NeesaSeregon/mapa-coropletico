@@ -17,15 +17,10 @@ interface PropiedadesRegion {
   name: string;
 }
 
-type TopoProvincias = Topology<{
-  provinces: GeometryCollection<PropiedadesRegion>;
-  autonomous_regions: GeometryCollection<PropiedadesRegion>;
-}>;
-
-type TopoMunicipios = Topology<{
-  municipalities: GeometryCollection<PropiedadesRegion>;
-  provinces: GeometryCollection<PropiedadesRegion>;
-}>;
+// Record<string, ...> satisface la restricción Objects<GeoJsonProperties> de topojson-specification
+type TopoGenerico = Topology<Record<string, GeometryCollection<PropiedadesRegion>>>;
+type TopoProvincias = TopoGenerico;
+type TopoMunicipios = TopoGenerico;
 
 @Component({
   selector: 'app-mapa',
@@ -43,7 +38,6 @@ export class MapaComponent {
   private mapListo = signal(false);
   private topoCache: TopoProvincias | null = null;
   private topoMunicipiosCache: TopoMunicipios | null = null;
-
   private svgRef: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
   private zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
 
@@ -75,34 +69,31 @@ export class MapaComponent {
   };
 
   private readonly codigosProvincias: Record<string, string> = {
-    '01': 'Araba/Álava',  '02': 'Albacete',        '03': 'Alacant/Alicante',
-    '04': 'Almería',      '05': 'Ávila',            '06': 'Badajoz',
-    '07': 'Illes Balears','08': 'Barcelona',        '09': 'Burgos',
-    '10': 'Cáceres',      '11': 'Cádiz',            '12': 'Castelló/Castellón',
-    '13': 'Ciudad Real',  '14': 'Córdoba',          '15': 'A Coruña',
-    '16': 'Cuenca',       '17': 'Girona',           '18': 'Granada',
-    '19': 'Guadalajara',  '20': 'Gipuzkoa',         '21': 'Huelva',
-    '22': 'Huesca',       '23': 'Jaén',             '24': 'León',
-    '25': 'Lleida',       '26': 'La Rioja',         '27': 'Lugo',
-    '28': 'Madrid',       '29': 'Málaga',           '30': 'Murcia',
-    '31': 'Navarra/Nafarroa', '32': 'Ourense',     '33': 'Asturias',
-    '34': 'Palencia',     '35': 'Las Palmas',       '36': 'Pontevedra',
+    '01': 'Araba/Álava',  '02': 'Albacete',          '03': 'Alacant/Alicante',
+    '04': 'Almería',      '05': 'Ávila',              '06': 'Badajoz',
+    '07': 'Illes Balears','08': 'Barcelona',          '09': 'Burgos',
+    '10': 'Cáceres',      '11': 'Cádiz',              '12': 'Castelló/Castellón',
+    '13': 'Ciudad Real',  '14': 'Córdoba',            '15': 'A Coruña',
+    '16': 'Cuenca',       '17': 'Girona',             '18': 'Granada',
+    '19': 'Guadalajara',  '20': 'Gipuzkoa',           '21': 'Huelva',
+    '22': 'Huesca',       '23': 'Jaén',               '24': 'León',
+    '25': 'Lleida',       '26': 'La Rioja',           '27': 'Lugo',
+    '28': 'Madrid',       '29': 'Málaga',             '30': 'Murcia',
+    '31': 'Navarra/Nafarroa', '32': 'Ourense',       '33': 'Asturias',
+    '34': 'Palencia',     '35': 'Las Palmas',         '36': 'Pontevedra',
     '37': 'Salamanca',    '38': 'Santa Cruz de Tenerife', '39': 'Cantabria',
-    '40': 'Segovia',      '41': 'Sevilla',          '42': 'Soria',
-    '43': 'Tarragona',    '44': 'Teruel',           '45': 'Toledo',
-    '46': 'Valencia/València', '47': 'Valladolid',  '48': 'Bizkaia',
-    '49': 'Zamora',       '50': 'Zaragoza',         '51': 'Ceuta',
+    '40': 'Segovia',      '41': 'Sevilla',            '42': 'Soria',
+    '43': 'Tarragona',    '44': 'Teruel',             '45': 'Toledo',
+    '46': 'Valencia/València', '47': 'Valladolid',   '48': 'Bizkaia',
+    '49': 'Zamora',       '50': 'Zaragoza',           '51': 'Ceuta',
     '52': 'Melilla'
   };
 
   constructor() {
     afterNextRender(() => this.mapListo.set(true));
-
     effect(() => {
       const modo = this.modoVista();
-      if (this.mapListo()) {
-        void this.renderizarMapa(modo);
-      }
+      if (this.mapListo()) void this.renderizarMapa(modo);
     }, { allowSignalWrites: true });
   }
 
@@ -118,6 +109,8 @@ export class MapaComponent {
         .call(this.zoomBehavior.transform, d3.zoomIdentity);
     }
   }
+
+  // ── helpers privados ──────────────────────────────────────────────────────
 
   private posicionRelativa(event: MouseEvent): { x: number; y: number } {
     const rect = this.contenedor().nativeElement.getBoundingClientRect();
@@ -146,11 +139,11 @@ export class MapaComponent {
       .attr('viewBox', `0 0 ${ancho} ${alto}`)
       .attr('preserveAspectRatio', 'xMidYMid meet');
 
-    // Fondo blanco para que el área exterior al mapa sea limpia
+    // Fondo color océano — así las áreas fuera de España quedan visualmente claras
     svg.append('rect')
       .attr('width', ancho)
       .attr('height', alto)
-      .attr('fill', '#f5f7fb');
+      .attr('fill', '#c6dff0');
 
     const g = svg.append('g');
 
@@ -163,22 +156,76 @@ export class MapaComponent {
     svg.call(zoom);
     this.svgRef = svg;
     this.zoomBehavior = zoom;
-
     return { svg, g };
+  }
+
+  /** Rellena el territorio de España antes de dibujar las regiones */
+  private dibujarFondoTierra(
+    g: d3.Selection<SVGGElement, unknown, null, undefined>,
+    topo: TopoGenerico,
+    path: d3.GeoPath
+  ): void {
+    const border = topojson.feature(topo, topo.objects['border']);
+    g.append('path')
+      .datum(border)
+      .attr('fill', '#eaedf0')
+      .attr('stroke', 'none')
+      .attr('pointer-events', 'none')
+      .attr('d', path);
+  }
+
+  /** Dibuja la línea de costa / frontera exterior encima de todo */
+  private dibujarCosta(
+    g: d3.Selection<SVGGElement, unknown, null, undefined>,
+    topo: TopoGenerico,
+    path: d3.GeoPath
+  ): void {
+    const border = topojson.feature(topo, topo.objects['border']);
+    g.append('path')
+      .datum(border)
+      .attr('fill', 'none')
+      .attr('stroke', '#7892a8')
+      .attr('stroke-width', 0.7)
+      .attr('pointer-events', 'none')
+      .attr('d', path);
+  }
+
+  /**
+   * Máscara océano: rectángulo grande con agujero en forma de España (evenodd).
+   * Cubre cualquier fill de región que se haya extendido más allá de la costa
+   * por efecto del clipExtent interno de geoConicConformalSpain.
+   */
+  private dibujarMascaraOceano(
+    g: d3.Selection<SVGGElement, unknown, null, undefined>,
+    topo: TopoGenerico,
+    path: d3.GeoPath,
+    ancho: number,
+    alto: number
+  ): void {
+    const border = topojson.feature(topo, topo.objects['border']);
+    const borderD = path(border) ?? '';
+    const m = 10000;
+    g.append('path')
+      .attr('d', `M ${-m},${-m} H ${ancho + m} V ${alto + m} H ${-m} Z ${borderD}`)
+      .attr('fill', '#c6dff0')
+      .attr('fill-rule', 'evenodd')
+      .attr('pointer-events', 'none');
   }
 
   private dibujarBordesInset(
     g: d3.Selection<SVGGElement, unknown, null, undefined>,
     projection: ReturnType<typeof geoConicConformalSpain>
   ): void {
-    const bordersPath = projection.getCompositionBorders();
     g.append('path')
-      .attr('d', bordersPath)
+      .attr('d', projection.getCompositionBorders())
       .attr('fill', 'none')
-      .attr('stroke', '#999')
+      .attr('stroke', '#8099b0')
       .attr('stroke-width', 0.8)
-      .attr('stroke-dasharray', '4,3');
+      .attr('stroke-dasharray', '4,3')
+      .attr('pointer-events', 'none');
   }
+
+  // ── render principal ──────────────────────────────────────────────────────
 
   private async renderizarMapa(modo: ModoVista): Promise<void> {
     const el = this.contenedor().nativeElement;
@@ -186,11 +233,8 @@ export class MapaComponent {
     this.svgRef = null;
     this.zoomBehavior = null;
 
-    if (modo === 'municipios') {
-      await this.renderizarMunicipios(el);
-    } else {
-      await this.renderizarNivel(el, modo);
-    }
+    if (modo === 'municipios') await this.renderizarMunicipios(el);
+    else await this.renderizarNivel(el, modo);
   }
 
   private async renderizarNivel(el: HTMLDivElement, modo: 'provincias' | 'comunidades'): Promise<void> {
@@ -203,8 +247,8 @@ export class MapaComponent {
     if (!this.topoCache) return;
 
     const objeto = modo === 'provincias'
-      ? this.topoCache.objects.provinces
-      : this.topoCache.objects.autonomous_regions;
+      ? this.topoCache.objects['provinces']
+      : this.topoCache.objects['autonomous_regions'];
     const datos = modo === 'provincias' ? this.datosProvincias : this.datosComunidades;
 
     const coleccion = topojson.feature(this.topoCache, objeto);
@@ -217,6 +261,8 @@ export class MapaComponent {
     const colorScale = this.crearEscalaColor(datos);
 
     const { g } = this.crearSvgBase(el, ancho, alto, 12);
+
+    this.dibujarFondoTierra(g, this.topoCache, path);
 
     g.selectAll<SVGPathElement, (typeof features)[number]>('.region')
       .data(features)
@@ -240,8 +286,11 @@ export class MapaComponent {
       .attr('fill', 'none')
       .attr('stroke', '#fff')
       .attr('stroke-width', 0.5)
+      .attr('pointer-events', 'none')
       .attr('d', path);
 
+    this.dibujarMascaraOceano(g, this.topoCache, path, ancho, alto);
+    this.dibujarCosta(g, this.topoCache, path);
     this.dibujarBordesInset(g, projection);
   }
 
@@ -257,10 +306,10 @@ export class MapaComponent {
       if (!this.topoMunicipiosCache) return;
 
       const topo = this.topoMunicipiosCache;
-      const coleccion = topojson.feature(topo, topo.objects.municipalities);
+      const coleccion = topojson.feature(topo, topo.objects['municipalities']);
       const features = 'features' in coleccion ? coleccion.features : [];
-      const mallaProvincias = topojson.mesh(topo, topo.objects.provinces, (a, b) => a !== b);
-      const mallaMunicipios = topojson.mesh(topo, topo.objects.municipalities, (a, b) => a !== b);
+      const mallaProvincias = topojson.mesh(topo, topo.objects['provinces'], (a, b) => a !== b);
+      const mallaMunicipios = topojson.mesh(topo, topo.objects['municipalities'], (a, b) => a !== b);
 
       const projection = geoConicConformalSpain();
       projection.fitSize([ancho, alto], coleccion);
@@ -269,11 +318,15 @@ export class MapaComponent {
 
       const { g } = this.crearSvgBase(el, ancho, alto, 40);
 
+      this.dibujarFondoTierra(g, topo, path);
+
       g.selectAll<SVGPathElement, (typeof features)[number]>('.municipio')
         .data(features)
         .enter()
         .append('path')
         .attr('class', 'region municipio')
+        .attr('data-mid', d => String(d.id ?? ''))
+        .attr('data-name', d => d.properties?.name ?? '')
         .attr('d', path)
         .attr('fill', d => {
           const codigo = String(d.id ?? '').slice(0, 2);
@@ -283,46 +336,52 @@ export class MapaComponent {
         })
         .attr('stroke', '#fff')
         .attr('stroke-width', 0.1)
-        .on('mouseover', (event: MouseEvent, d) => {
-          const codigo = String(d.id ?? '').slice(0, 2);
+        .on('mouseover', (event: MouseEvent) => {
+          const el = event.currentTarget as SVGPathElement;
+          const mid = el.getAttribute('data-mid') ?? '';
+          const name = el.getAttribute('data-name') ?? '';
+          const codigo = mid.slice(0, 2);
           const nombreProv = this.codigosProvincias[codigo] ?? '';
           const valor = this.datosProvincias[nombreProv];
           const texto = valor != null
-            ? `${d.properties.name} · ${nombreProv}: ${valor.toFixed(2)}M hab.`
-            : d.properties.name;
+            ? `${name} · ${nombreProv}: ${valor.toFixed(2)}M hab.`
+            : name;
           const pos = this.posicionRelativa(event);
           this.tooltip.set({ visible: true, texto, x: pos.x, y: pos.y });
-          d3.select(event.currentTarget as Element).attr('stroke', '#1a1a2e').attr('stroke-width', 0.8);
+          d3.select(el).attr('stroke', '#1a1a2e').attr('stroke-width', 0.8);
         })
         .on('mousemove', (event: MouseEvent) => this.alMover(event))
         .on('mouseout', () => {
           this.tooltip.update(t => ({ ...t, visible: false }));
           d3.selectAll<SVGPathElement, unknown>('.municipio')
-            .attr('stroke', '#fff')
-            .attr('stroke-width', 0.1);
+            .attr('stroke', '#fff').attr('stroke-width', 0.1);
         })
-        .on('click', (_event: MouseEvent, d) => this.alHacerClick(d));
+        .on('click', (event: MouseEvent) => {
+          const el = event.currentTarget as SVGPathElement;
+          const name = el.getAttribute('data-name') ?? '';
+          this.zonaSeleccionada.update(actual => actual === name ? null : name);
+        });
 
-      g.append('path')
-        .datum(mallaMunicipios)
-        .attr('fill', 'none')
-        .attr('stroke', 'rgba(255,255,255,0.35)')
-        .attr('stroke-width', 0.15)
-        .attr('d', path);
+      // Bordes municipales muy finos
+      g.append('path').datum(mallaMunicipios)
+        .attr('fill', 'none').attr('stroke', 'rgba(255,255,255,0.3)')
+        .attr('stroke-width', 0.15).attr('pointer-events', 'none').attr('d', path);
 
-      g.append('path')
-        .datum(mallaProvincias)
-        .attr('fill', 'none')
-        .attr('stroke', '#fff')
-        .attr('stroke-width', 0.9)
-        .attr('d', path);
+      // Bordes provinciales más visibles encima
+      g.append('path').datum(mallaProvincias)
+        .attr('fill', 'none').attr('stroke', '#fff')
+        .attr('stroke-width', 0.9).attr('pointer-events', 'none').attr('d', path);
 
+      this.dibujarMascaraOceano(g, topo, path, ancho, alto);
+      this.dibujarCosta(g, topo, path);
       this.dibujarBordesInset(g, projection);
 
     } finally {
       this.cargando.set(false);
     }
   }
+
+  // ── eventos ───────────────────────────────────────────────────────────────
 
   private alHover(event: MouseEvent, d: { properties: PropiedadesRegion }, datos: Record<string, number>): void {
     const nombre = d.properties.name;
