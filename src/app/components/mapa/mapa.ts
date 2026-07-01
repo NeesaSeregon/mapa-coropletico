@@ -38,6 +38,7 @@ export class MapaComponent {
   private mapListo = signal(false);
   private topoCache: TopoProvincias | null = null;
   private topoMunicipiosCache: TopoMunicipios | null = null;
+  private pobMunicipiosCache: Record<string, number> | null = null;
   private svgRef: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
   private zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
 
@@ -139,11 +140,10 @@ export class MapaComponent {
       .attr('viewBox', `0 0 ${ancho} ${alto}`)
       .attr('preserveAspectRatio', 'xMidYMid meet');
 
-    // Fondo color océano — así las áreas fuera de España quedan visualmente claras
     svg.append('rect')
       .attr('width', ancho)
       .attr('height', alto)
-      .attr('fill', '#c6dff0');
+      .attr('fill', '#f5f7fb');
 
     const g = svg.append('g');
 
@@ -207,7 +207,7 @@ export class MapaComponent {
     const m = 10000;
     g.append('path')
       .attr('d', `M ${-m},${-m} H ${ancho + m} V ${alto + m} H ${-m} Z ${borderD}`)
-      .attr('fill', '#c6dff0')
+      .attr('fill', '#f5f7fb')
       .attr('fill-rule', 'evenodd')
       .attr('pointer-events', 'none');
   }
@@ -303,78 +303,188 @@ export class MapaComponent {
       if (!this.topoMunicipiosCache) {
         this.topoMunicipiosCache = await d3.json<TopoMunicipios>('/assets/municipalities.json') ?? null;
       }
+      if (!this.pobMunicipiosCache) {
+        this.pobMunicipiosCache = await d3.json<Record<string, number>>('/assets/municipios-poblacion.json') ?? null;
+      }
       if (!this.topoMunicipiosCache) return;
 
       const topo = this.topoMunicipiosCache;
+      const pob = this.pobMunicipiosCache ?? {};
       const coleccion = topojson.feature(topo, topo.objects['municipalities']);
       const features = 'features' in coleccion ? coleccion.features : [];
       const mallaProvincias = topojson.mesh(topo, topo.objects['provinces'], (a, b) => a !== b);
       const mallaMunicipios = topojson.mesh(topo, topo.objects['municipalities'], (a, b) => a !== b);
 
+      if (!this.topoCache) {
+        this.topoCache = await d3.json<TopoProvincias>('/assets/provinces.json') ?? null;
+      }
+
       const projection = geoConicConformalSpain();
-      projection.fitSize([ancho, alto], coleccion);
+      const fitTarget = this.topoCache
+        ? topojson.feature(this.topoCache, this.topoCache.objects['provinces'])
+        : topojson.feature(topo, topo.objects['border']);
+      projection.fitSize([ancho, alto], fitTarget);
       const path = d3.geoPath().projection(projection);
-      const colorScale = this.crearEscalaColor(this.datosProvincias);
 
-      const { g } = this.crearSvgBase(el, ancho, alto, 40);
+      // Escala cuantil 7 clases: samplea interpolateBlues desde 0.25 (azul visible)
+      // hasta 1.0, evitando los azules casi-blancos que se pierden contra el fondo.
+      const colorRange = d3.range(7).map(i => d3.interpolateBlues(0.35 + 0.65 * (i / 6)));
+      const colorScale = d3.scaleQuantile<string>()
+        .domain(Object.values(pob).filter(v => v > 0))
+        .range(colorRange);
 
+      const formatPob = (n: number): string => {
+        if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M hab.`;
+        if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k hab.`;
+        return `${n} hab.`;
+      };
+
+      const { svg, g } = this.crearSvgBase(el, ancho, alto, 40);
+
+      // Fondo gris tierra
       this.dibujarFondoTierra(g, topo, path);
 
-      g.selectAll<SVGPathElement, (typeof features)[number]>('.municipio')
-        .data(features)
-        .enter()
-        .append('path')
-        .attr('class', 'region municipio')
-        .attr('data-mid', d => String(d.id ?? ''))
-        .attr('data-name', d => d.properties?.name ?? '')
-        .attr('d', path)
-        .attr('fill', d => {
-          const codigo = String(d.id ?? '').slice(0, 2);
-          const nombreProv = this.codigosProvincias[codigo];
-          const valor = nombreProv ? this.datosProvincias[nombreProv] : undefined;
-          return valor != null ? (colorScale(valor) ?? '#d0d0d0') : '#d0d0d0';
-        })
-        .attr('stroke', '#fff')
-        .attr('stroke-width', 0.1)
-        .on('mouseover', (event: MouseEvent) => {
-          const el = event.currentTarget as SVGPathElement;
-          const mid = el.getAttribute('data-mid') ?? '';
-          const name = el.getAttribute('data-name') ?? '';
-          const codigo = mid.slice(0, 2);
-          const nombreProv = this.codigosProvincias[codigo] ?? '';
-          const valor = this.datosProvincias[nombreProv];
-          const texto = valor != null
-            ? `${name} · ${nombreProv}: ${valor.toFixed(2)}M hab.`
-            : name;
-          const pos = this.posicionRelativa(event);
-          this.tooltip.set({ visible: true, texto, x: pos.x, y: pos.y });
-          d3.select(el).attr('stroke', '#1a1a2e').attr('stroke-width', 0.8);
-        })
-        .on('mousemove', (event: MouseEvent) => this.alMover(event))
-        .on('mouseout', () => {
-          this.tooltip.update(t => ({ ...t, visible: false }));
-          d3.selectAll<SVGPathElement, unknown>('.municipio')
-            .attr('stroke', '#fff').attr('stroke-width', 0.1);
-        })
-        .on('click', (event: MouseEvent) => {
-          const el = event.currentTarget as SVGPathElement;
-          const name = el.getAttribute('data-name') ?? '';
-          this.zonaSeleccionada.update(actual => actual === name ? null : name);
-        });
+      // ClipPath: recorta los fills de municipios exactamente al borde de España.
+      // Sin esto, los paths costeros se proyectan ligeramente fuera de la costa y
+      // muestran color azul en el área del océano.
+      const clipId = 'municipios-spain-clip';
+      const borderClipD = path(topojson.feature(topo, topo.objects['border'])) ?? '';
+      svg.append('defs')
+        .append('clipPath').attr('id', clipId)
+        .append('path').attr('d', borderClipD);
 
-      // Bordes municipales muy finos
+      // Sub-grupo recortado: ningún fill sale al océano
+      const gMun = g.append('g').attr('clip-path', `url(#${clipId})`);
+
+      type PathSel = d3.Selection<SVGPathElement, unknown, null, undefined>;
+      const pathMap = new Map<string, PathSel>();
+
+      interface CentroidEntry {
+        x: number; y: number;
+        name: string; nombreProv: string; mid: string;
+        poblacion: number | undefined;
+      }
+      const centroids: CentroidEntry[] = [];
+
+      for (const feat of features) {
+        const dVal = path(feat);
+        if (!dVal) continue;
+
+        const mid = String(feat.id ?? '');
+        const name = feat.properties?.name ?? '';
+        const codigoProv = mid.padStart(5, '0').slice(0, 2);
+        const nombreProv = this.codigosProvincias[codigoProv] ?? '';
+        const poblacion = pob[mid.padStart(5, '0')];
+        const fillColor = poblacion != null ? (colorScale(poblacion) ?? '#dce8f5') : '#dce8f5';
+
+        const c = path.centroid(feat);
+        if (isFinite(c[0]) && isFinite(c[1])) {
+          centroids.push({ x: c[0], y: c[1], name, nombreProv, mid, poblacion });
+        }
+
+        const pSel = gMun.append<SVGPathElement>('path')
+          .attr('class', 'region municipio')
+          .attr('d', dVal)
+          .style('fill', fillColor)
+          .attr('stroke', '#fff')
+          .attr('stroke-width', 0.1);
+        pathMap.set(mid, pSel);
+      }
+
+      // Bordes encima de los colores
       g.append('path').datum(mallaMunicipios)
         .attr('fill', 'none').attr('stroke', 'rgba(255,255,255,0.3)')
         .attr('stroke-width', 0.15).attr('pointer-events', 'none').attr('d', path);
 
-      // Bordes provinciales más visibles encima
       g.append('path').datum(mallaProvincias)
         .attr('fill', 'none').attr('stroke', '#fff')
         .attr('stroke-width', 0.9).attr('pointer-events', 'none').attr('d', path);
 
-      this.dibujarMascaraOceano(g, topo, path, ancho, alto);
       this.dibujarCosta(g, topo, path);
       this.dibujarBordesInset(g, projection);
+
+      // Path de highlight encima de todo (no recortado → trazo siempre visible)
+      const highlightPath = g.append('path')
+        .attr('fill', 'none')
+        .attr('stroke', '#1a1a2e')
+        .attr('stroke-width', 1.5)
+        .attr('pointer-events', 'none')
+        .attr('d', '');
+
+      // ── Quadtree + overlay para hover preciso ──────────────────────────────
+      const qt = d3.quadtree<CentroidEntry>()
+        .x(d => d.x).y(d => d.y)
+        .addAll(centroids);
+
+      let activeMid: string | null = null;
+      let mousedownXY: [number, number] = [0, 0];
+      const savedFill = new Map<string, string>();
+
+      const highlightMunicipio = (mid: string | null) => {
+        if (activeMid) {
+          const prev = pathMap.get(activeMid);
+          if (prev) {
+            const orig = savedFill.get(activeMid);
+            if (orig) prev.style('fill', orig);
+          }
+        }
+        if (mid) {
+          const cur = pathMap.get(mid);
+          if (cur) {
+            if (!savedFill.has(mid)) savedFill.set(mid, cur.style('fill') || cur.attr('fill'));
+            const base = d3.color(savedFill.get(mid)!) ?? d3.color('#6baed6')!;
+            cur.style('fill', base.brighter(0.8).formatHex());
+            highlightPath.attr('d', cur.attr('d') ?? '');
+          }
+        } else {
+          highlightPath.attr('d', '');
+        }
+        activeMid = mid;
+      };
+
+      const textoTooltip = (e: CentroidEntry): string => {
+        if (e.poblacion != null) return `${e.name}: ${formatPob(e.poblacion)}`;
+        return e.nombreProv ? `${e.name} · ${e.nombreProv}` : e.name;
+      };
+
+      // Rect transparente encima de todo el SVG — captura todos los eventos
+      svg.append('rect')
+        .attr('class', 'municipios-overlay')
+        .attr('width', ancho).attr('height', alto)
+        .attr('fill', 'none')
+        .attr('pointer-events', 'all')
+        .style('cursor', 'pointer')
+        .on('mousedown', (event: MouseEvent) => {
+          mousedownXY = [event.clientX, event.clientY];
+        })
+        .on('mousemove', (event: MouseEvent) => {
+          const xform = d3.zoomTransform(svg.node()!);
+          const [px, py] = d3.pointer(event);
+          const [gx, gy] = xform.invert([px, py]);
+          const found = qt.find(gx, gy, 15 / xform.k);
+          if (found) {
+            if (found.mid !== activeMid) highlightMunicipio(found.mid);
+            const pos = this.posicionRelativa(event);
+            this.tooltip.set({ visible: true, texto: textoTooltip(found), x: pos.x, y: pos.y });
+          } else {
+            if (activeMid) highlightMunicipio(null);
+            this.tooltip.update(s => ({ ...s, visible: false }));
+          }
+        })
+        .on('mouseout', () => {
+          highlightMunicipio(null);
+          this.tooltip.update(s => ({ ...s, visible: false }));
+        })
+        .on('click', (event: MouseEvent) => {
+          const dx = event.clientX - mousedownXY[0];
+          const dy = event.clientY - mousedownXY[1];
+          if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+          const xform = d3.zoomTransform(svg.node()!);
+          const [px, py] = d3.pointer(event);
+          const [gx, gy] = xform.invert([px, py]);
+          const found = qt.find(gx, gy, 15 / xform.k);
+          if (found) this.zonaSeleccionada.update(a => a === found.name ? null : found.name);
+        });
 
     } finally {
       this.cargando.set(false);
