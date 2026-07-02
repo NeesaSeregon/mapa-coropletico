@@ -39,35 +39,10 @@ export class MapaComponent {
   private topoCache: TopoProvincias | null = null;
   private topoMunicipiosCache: TopoMunicipios | null = null;
   private pobMunicipiosCache: Record<string, number> | null = null;
+  private pobProvinciasCache: Record<string, number> | null = null;
+  private pobComunidadesCache: Record<string, number> | null = null;
   private svgRef: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
   private zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
-
-  private readonly datosProvincias: Record<string, number> = {
-    'A Coruña': 1.12, 'Araba/Álava': 0.33, 'Albacete': 0.39, 'Alacant/Alicante': 1.88,
-    'Almería': 0.73, 'Asturias': 1.02, 'Ávila': 0.16, 'Badajoz': 0.68,
-    'Illes Balears': 1.17, 'Barcelona': 5.71, 'Burgos': 0.36, 'Cáceres': 0.39,
-    'Cádiz': 1.24, 'Cantabria': 0.58, 'Castelló/Castellón': 0.60, 'Ciudad Real': 0.50,
-    'Córdoba': 0.78, 'Cuenca': 0.20, 'Girona': 0.78, 'Granada': 0.92,
-    'Guadalajara': 0.27, 'Gipuzkoa': 0.72, 'Huelva': 0.52, 'Huesca': 0.22,
-    'Jaén': 0.63, 'León': 0.45, 'Lleida': 0.44, 'La Rioja': 0.32,
-    'Lugo': 0.33, 'Madrid': 6.75, 'Málaga': 1.68, 'Murcia': 1.51,
-    'Navarra/Nafarroa': 0.66, 'Ourense': 0.31, 'Palencia': 0.16, 'Las Palmas': 1.13,
-    'Pontevedra': 0.94, 'Salamanca': 0.33, 'Santa Cruz de Tenerife': 1.03,
-    'Segovia': 0.16, 'Sevilla': 1.95, 'Soria': 0.09, 'Tarragona': 0.82,
-    'Teruel': 0.14, 'Toledo': 0.70, 'Valencia/València': 2.58, 'Valladolid': 0.52,
-    'Bizkaia': 1.15, 'Zamora': 0.17, 'Zaragoza': 0.97,
-    'Ceuta': 0.08, 'Melilla': 0.08
-  };
-
-  private readonly datosComunidades: Record<string, number> = {
-    'Andalucía': 8.50, 'Aragón': 1.33, 'Principado de Asturias': 1.02,
-    'Illes Balears': 1.17, 'Canarias': 2.17, 'Cantabria': 0.58,
-    'Castilla-La Mancha': 2.10, 'Castilla y León': 2.39, 'Cataluña/Catalunya': 7.80,
-    'Comunitat Valenciana': 5.06, 'Extremadura': 1.07, 'Galicia': 2.70,
-    'La Rioja': 0.32, 'Comunidad de Madrid': 6.75, 'Región de Murcia': 1.51,
-    'Comunidad Foral de Navarra': 0.66, 'País Vasco/Euskadi': 2.22,
-    'Ciudad Autónoma de Ceuta': 0.08, 'Ciudad Autónoma de Melilla': 0.08
-  };
 
   private readonly codigosProvincias: Record<string, string> = {
     '01': 'Araba/Álava',  '02': 'Albacete',          '03': 'Alacant/Alicante',
@@ -116,6 +91,12 @@ export class MapaComponent {
   private posicionRelativa(event: MouseEvent): { x: number; y: number } {
     const rect = this.contenedor().nativeElement.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  private formatPoblacion(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M hab.`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k hab.`;
+    return `${n} hab.`;
   }
 
   private crearEscalaColor(datos: Record<string, number>): d3.ScaleQuantile<string, never> {
@@ -244,12 +225,18 @@ export class MapaComponent {
     if (!this.topoCache) {
       this.topoCache = await d3.json<TopoProvincias>('/assets/provinces.json') ?? null;
     }
+    if (modo === 'provincias' && !this.pobProvinciasCache) {
+      this.pobProvinciasCache = await d3.json<Record<string, number>>('/assets/provincias-poblacion.json') ?? null;
+    }
+    if (modo === 'comunidades' && !this.pobComunidadesCache) {
+      this.pobComunidadesCache = await d3.json<Record<string, number>>('/assets/comunidades-poblacion.json') ?? null;
+    }
     if (!this.topoCache) return;
 
     const objeto = modo === 'provincias'
       ? this.topoCache.objects['provinces']
       : this.topoCache.objects['autonomous_regions'];
-    const datos = modo === 'provincias' ? this.datosProvincias : this.datosComunidades;
+    const datos = (modo === 'provincias' ? this.pobProvinciasCache : this.pobComunidadesCache) ?? {};
 
     const coleccion = topojson.feature(this.topoCache, objeto);
     const features = 'features' in coleccion ? coleccion.features : [];
@@ -333,11 +320,7 @@ export class MapaComponent {
         .domain(Object.values(pob).filter(v => v > 0))
         .range(colorRange);
 
-      const formatPob = (n: number): string => {
-        if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M hab.`;
-        if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k hab.`;
-        return `${n} hab.`;
-      };
+      const formatPob = this.formatPoblacion;
 
       const { svg, g } = this.crearSvgBase(el, ancho, alto, 40);
 
