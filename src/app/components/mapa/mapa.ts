@@ -1,17 +1,10 @@
-import { Component, ElementRef, signal, viewChild, afterNextRender, effect } from '@angular/core';
+import { Component, ElementRef, NgZone, signal, viewChild, afterNextRender, effect, inject } from '@angular/core';
 import * as d3 from 'd3';
 import * as topojson from 'topojson-client';
 import { geoConicConformalSpain } from 'd3-composite-projections';
 import type { Topology, GeometryCollection } from 'topojson-specification';
 
 export type ModoVista = 'provincias' | 'comunidades' | 'municipios';
-
-interface TooltipState {
-  visible: boolean;
-  texto: string;
-  x: number;
-  y: number;
-}
 
 interface PropiedadesRegion {
   name: string;
@@ -29,10 +22,11 @@ type TopoMunicipios = TopoGenerico;
 })
 export class MapaComponent {
   private contenedor = viewChild.required<ElementRef<HTMLDivElement>>('contenedor');
+  private tooltipEl = viewChild.required<ElementRef<HTMLDivElement>>('tooltipEl');
+  private readonly ngZone = inject(NgZone);
 
   modoVista = signal<ModoVista>('provincias');
   cargando = signal(false);
-  tooltip = signal<TooltipState>({ visible: false, texto: '', x: 0, y: 0 });
   zonaSeleccionada = signal<string | null>(null);
 
   private mapListo = signal(false);
@@ -75,7 +69,7 @@ export class MapaComponent {
 
   cambiarModo(modo: ModoVista): void {
     this.zonaSeleccionada.set(null);
-    this.tooltip.set({ visible: false, texto: '', x: 0, y: 0 });
+    this.ocultarTooltip();
     this.modoVista.set(modo);
   }
 
@@ -93,10 +87,33 @@ export class MapaComponent {
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
 
+  /**
+   * Manipula el tooltip directamente por DOM (sin signals) para que seguir el
+   * cursor en mousemove no dispare change detection de Angular en cada píxel:
+   * con miles de paths de municipios en pantalla, eso es lo que causaba el lag.
+   */
+  private mostrarTooltip(texto: string, x: number, y: number): void {
+    const el = this.tooltipEl().nativeElement;
+    el.textContent = texto;
+    el.style.left = `${x + 14}px`;
+    el.style.top = `${y - 36}px`;
+    el.style.display = 'block';
+  }
+
+  private ocultarTooltip(): void {
+    this.tooltipEl().nativeElement.style.display = 'none';
+  }
+
   private formatPoblacion(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M hab.`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k hab.`;
     return `${n} hab.`;
+  }
+
+  private readonly formatoMiles = new Intl.NumberFormat('es-ES');
+
+  private formatPoblacionCompleta(n: number): string {
+    return `${this.formatoMiles.format(n)} hab.`;
   }
 
   private crearEscalaColor(datos: Record<string, number>): d3.ScaleQuantile<string, never> {
@@ -105,15 +122,42 @@ export class MapaComponent {
       .range([...d3.schemeBlues[7]]);
   }
 
+  /**
+   * Algunos municipios del topojson traen un anillo con el sentido de giro
+   * invertido (probablemente un artefacto de la simplificación). d3-geo usa
+   * convenciones esféricas y, ante un anillo invertido, lo interpreta como
+   * "todo el globo menos ese área": el municipio se proyecta como un blob
+   * gigante que tapa el resto del mapa dibujado antes que él. Se detecta
+   * evaluando cada anillo de forma aislada (geoArea > π ⇒ girado al revés)
+   * y se corrige anillo a anillo, no la geometría entera, porque un mismo
+   * municipio puede tener un anillo bueno y otro malo (p.ej. multipolígonos
+   * con un sliver degenerado junto al polígono real).
+   */
+  private repararGiroAnillos(geom: GeoJSON.Geometry): void {
+    const anilloInvertido = (ring: GeoJSON.Position[]): boolean =>
+      d3.geoArea({ type: 'Polygon', coordinates: [ring] }) > Math.PI;
+
+    if (geom.type === 'Polygon') {
+      geom.coordinates = geom.coordinates.map(r => anilloInvertido(r) ? [...r].reverse() : r);
+    } else if (geom.type === 'MultiPolygon') {
+      geom.coordinates = geom.coordinates.map(poly =>
+        poly.map(r => anilloInvertido(r) ? [...r].reverse() : r)
+      );
+    }
+  }
+
   private crearSvgBase(
     el: HTMLDivElement,
     ancho: number,
     alto: number,
-    maxZoom: number
+    maxZoom: number,
+    alZoom?: (transform: d3.ZoomTransform) => void
   ): {
     svg: d3.Selection<SVGSVGElement, unknown, null, undefined>;
     g: d3.Selection<SVGGElement, unknown, null, undefined>;
   } {
+    // El fondo océano ya no se pinta con un <rect> del SVG (eso taparía el
+    // canvas de municipios, que va debajo): lo pone el CSS de .mapa-contenedor.
     const svg = d3.select<HTMLDivElement, unknown>(el)
       .append<SVGSVGElement>('svg')
       .attr('width', '100%')
@@ -121,20 +165,18 @@ export class MapaComponent {
       .attr('viewBox', `0 0 ${ancho} ${alto}`)
       .attr('preserveAspectRatio', 'xMidYMid meet');
 
-    svg.append('rect')
-      .attr('width', ancho)
-      .attr('height', alto)
-      .attr('fill', '#f5f7fb');
-
     const g = svg.append('g');
 
     const zoom = d3.zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.8, maxZoom])
       .on('zoom', (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
         g.attr('transform', event.transform.toString());
+        alZoom?.(event.transform);
       });
 
-    svg.call(zoom);
+    // Fuera de la zona de Angular: el zoom/pan dispara este handler en cada
+    // frame y no toca ningún estado de Angular, solo el DOM del SVG.
+    this.ngZone.runOutsideAngular(() => svg.call(zoom));
     this.svgRef = svg;
     this.zoomBehavior = zoom;
     return { svg, g };
@@ -211,6 +253,7 @@ export class MapaComponent {
   private async renderizarMapa(modo: ModoVista): Promise<void> {
     const el = this.contenedor().nativeElement;
     d3.select(el).selectAll('svg').remove();
+    d3.select(el).selectAll('canvas').remove();
     this.svgRef = null;
     this.zoomBehavior = null;
 
@@ -251,22 +294,26 @@ export class MapaComponent {
 
     this.dibujarFondoTierra(g, this.topoCache, path);
 
-    g.selectAll<SVGPathElement, (typeof features)[number]>('.region')
-      .data(features)
-      .enter()
-      .append('path')
-      .attr('class', 'region')
-      .attr('d', path)
-      .attr('fill', d => {
-        const valor = datos[d.properties.name];
-        return valor != null ? (colorScale(valor) ?? '#d0d0d0') : '#d0d0d0';
-      })
-      .attr('stroke', '#fff')
-      .attr('stroke-width', 0.5)
-      .on('mouseover', (event: MouseEvent, d) => this.alHover(event, d, datos))
-      .on('mousemove', (event: MouseEvent) => this.alMover(event))
-      .on('mouseout', () => this.alSalir())
-      .on('click', (_event: MouseEvent, d) => this.alHacerClick(d));
+    // Fuera de la zona de Angular: hover/mousemove sobre las regiones no debe
+    // disparar change detection en cada píxel de movimiento del ratón.
+    this.ngZone.runOutsideAngular(() => {
+      g.selectAll<SVGPathElement, (typeof features)[number]>('.region')
+        .data(features)
+        .enter()
+        .append('path')
+        .attr('class', 'region')
+        .attr('d', path)
+        .attr('fill', d => {
+          const valor = datos[d.properties.name];
+          return valor != null ? (colorScale(valor) ?? '#d0d0d0') : '#d0d0d0';
+        })
+        .attr('stroke', '#fff')
+        .attr('stroke-width', 0.5)
+        .on('mouseover', (event: MouseEvent, d) => this.alHover(event, d, datos))
+        .on('mousemove', (event: MouseEvent) => this.alMover(event))
+        .on('mouseout', () => this.alSalir())
+        .on('click', (_event: MouseEvent, d) => this.ngZone.run(() => this.alHacerClick(d)));
+    });
 
     g.append('path')
       .datum(mallaBordes)
@@ -322,25 +369,33 @@ export class MapaComponent {
 
       const formatPob = this.formatPoblacion;
 
-      const { svg, g } = this.crearSvgBase(el, ancho, alto, 40);
+      // ── Canvas para los rellenos de los municipios ──────────────────────────
+      // Pintar 8.213 <path> de SVG individuales obliga al navegador a
+      // recomponer miles de nodos del DOM en cada frame de zoom/pan, y a
+      // zoom bajo (toda España visible a la vez) eso se nota muchísimo. Un
+      // <canvas> es un único destino de rasterizado: cada frame se redibuja
+      // de una vez, sin el coste de gestión de miles de elementos del DOM.
+      const dpr = window.devicePixelRatio || 1;
+      const canvas = d3.select<HTMLDivElement, unknown>(el)
+        .append<HTMLCanvasElement>('canvas')
+        .attr('width', ancho * dpr)
+        .attr('height', alto * dpr)
+        .style('width', '100%')
+        .style('height', '100%')
+        .style('position', 'absolute')
+        .style('inset', '0')
+        .style('pointer-events', 'none');
+      const ctx = canvas.node()!.getContext('2d')!;
+      const borderFeature = topojson.feature(topo, topo.objects['border']);
+      const borderPath2D = new Path2D(path(borderFeature) ?? '');
 
-      // Fondo gris tierra
-      this.dibujarFondoTierra(g, topo, path);
-
-      // ClipPath: recorta los fills de municipios exactamente al borde de España.
-      // Sin esto, los paths costeros se proyectan ligeramente fuera de la costa y
-      // muestran color azul en el área del océano.
-      const clipId = 'municipios-spain-clip';
-      const borderClipD = path(topojson.feature(topo, topo.objects['border'])) ?? '';
-      svg.append('defs')
-        .append('clipPath').attr('id', clipId)
-        .append('path').attr('d', borderClipD);
-
-      // Sub-grupo recortado: ningún fill sale al océano
-      const gMun = g.append('g').attr('clip-path', `url(#${clipId})`);
-
-      type PathSel = d3.Selection<SVGPathElement, unknown, null, undefined>;
-      const pathMap = new Map<string, PathSel>();
+      const dMap = new Map<string, string>();
+      const fillMap = new Map<string, string>();
+      // Path2D precalculado por municipio: evita volver a proyectar (trigonometría
+      // de la cónica conforme) las ~8.213 geometrías en cada frame de zoom/pan.
+      // Solo se recorre el punto a punto una vez, al cargar; luego cada redibujado
+      // reutiliza la forma ya vectorizada y únicamente cambia fillStyle + fill().
+      const path2DMap = new Map<string, Path2D>();
 
       interface CentroidEntry {
         x: number; y: number;
@@ -350,6 +405,7 @@ export class MapaComponent {
       const centroids: CentroidEntry[] = [];
 
       for (const feat of features) {
+        this.repararGiroAnillos(feat.geometry);
         const dVal = path(feat);
         if (!dVal) continue;
 
@@ -365,14 +421,56 @@ export class MapaComponent {
           centroids.push({ x: c[0], y: c[1], name, nombreProv, mid, poblacion });
         }
 
-        const pSel = gMun.append<SVGPathElement>('path')
-          .attr('class', 'region municipio')
-          .attr('d', dVal)
-          .style('fill', fillColor)
-          .attr('stroke', '#fff')
-          .attr('stroke-width', 0.1);
-        pathMap.set(mid, pSel);
+        dMap.set(mid, dVal);
+        fillMap.set(mid, fillColor);
+        path2DMap.set(mid, new Path2D(dVal));
       }
+
+      /** Redibuja el canvas entero aplicando la transformación de zoom/pan actual. */
+      const redibujarCanvas = (transform: d3.ZoomTransform): void => {
+        const nodo = canvas.node()!;
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, nodo.width, nodo.height);
+        ctx.scale(dpr, dpr);
+        ctx.translate(transform.x, transform.y);
+        ctx.scale(transform.k, transform.k);
+
+        // Fondo gris tierra, igual que antes hacía dibujarFondoTierra() en SVG.
+        ctx.fillStyle = '#eaedf0';
+        ctx.fill(borderPath2D);
+
+        // Recorte a la silueta de España: sin esto los paths costeros, que se
+        // proyectan ligeramente fuera de la costa, pintarían azul en el océano.
+        ctx.save();
+        ctx.clip(borderPath2D);
+        for (const [mid, fill] of fillMap) {
+          const p2d = path2DMap.get(mid);
+          if (!p2d) continue;
+          ctx.fillStyle = fill;
+          ctx.fill(p2d);
+        }
+        ctx.restore();
+        ctx.restore();
+      };
+
+      // d3-zoom dispara 'zoom' muchas veces durante un solo gesto; coalescemos
+      // los redibujados a un máximo de uno por frame con requestAnimationFrame
+      // en vez de redibujar las 8.213 geometrías en cada evento.
+      let transformPendiente: d3.ZoomTransform | null = null;
+      let rafPendiente = false;
+      const programarRedibujado = (transform: d3.ZoomTransform): void => {
+        transformPendiente = transform;
+        if (rafPendiente) return;
+        rafPendiente = true;
+        requestAnimationFrame(() => {
+          rafPendiente = false;
+          if (transformPendiente) redibujarCanvas(transformPendiente);
+        });
+      };
+
+      const { svg, g } = this.crearSvgBase(el, ancho, alto, 40, programarRedibujado);
+      redibujarCanvas(d3.zoomIdentity);
 
       // Bordes encima de los colores
       g.append('path').datum(mallaMunicipios)
@@ -386,7 +484,10 @@ export class MapaComponent {
       this.dibujarCosta(g, topo, path);
       this.dibujarBordesInset(g, projection);
 
-      // Path de highlight encima de todo (no recortado → trazo siempre visible)
+      // Path de highlight encima de todo: el municipio resaltado se dibuja con
+      // un fill más claro + contorno oscuro sobre el canvas. Al ser un único
+      // elemento SVG, actualizarlo en cada cambio de hover es barato — no hace
+      // falta tocar/redibujar el canvas para resaltar un municipio.
       const highlightPath = g.append('path')
         .attr('fill', 'none')
         .attr('stroke', '#1a1a2e')
@@ -401,26 +502,17 @@ export class MapaComponent {
 
       let activeMid: string | null = null;
       let mousedownXY: [number, number] = [0, 0];
-      const savedFill = new Map<string, string>();
 
       const highlightMunicipio = (mid: string | null) => {
-        if (activeMid) {
-          const prev = pathMap.get(activeMid);
-          if (prev) {
-            const orig = savedFill.get(activeMid);
-            if (orig) prev.style('fill', orig);
-          }
-        }
         if (mid) {
-          const cur = pathMap.get(mid);
-          if (cur) {
-            if (!savedFill.has(mid)) savedFill.set(mid, cur.style('fill') || cur.attr('fill'));
-            const base = d3.color(savedFill.get(mid)!) ?? d3.color('#6baed6')!;
-            cur.style('fill', base.brighter(0.8).formatHex());
-            highlightPath.attr('d', cur.attr('d') ?? '');
+          const d = dMap.get(mid);
+          const orig = fillMap.get(mid);
+          if (d && orig) {
+            const base = d3.color(orig) ?? d3.color('#6baed6')!;
+            highlightPath.attr('d', d).attr('fill', base.brighter(0.8).formatHex());
           }
         } else {
-          highlightPath.attr('d', '');
+          highlightPath.attr('d', '').attr('fill', 'none');
         }
         activeMid = mid;
       };
@@ -430,44 +522,63 @@ export class MapaComponent {
         return e.nombreProv ? `${e.name} · ${e.nombreProv}` : e.name;
       };
 
-      // Rect transparente encima de todo el SVG — captura todos los eventos
-      svg.append('rect')
-        .attr('class', 'municipios-overlay')
-        .attr('width', ancho).attr('height', alto)
-        .attr('fill', 'none')
-        .attr('pointer-events', 'all')
-        .style('cursor', 'pointer')
-        .on('mousedown', (event: MouseEvent) => {
-          mousedownXY = [event.clientX, event.clientY];
-        })
-        .on('mousemove', (event: MouseEvent) => {
-          const xform = d3.zoomTransform(svg.node()!);
-          const [px, py] = d3.pointer(event);
-          const [gx, gy] = xform.invert([px, py]);
-          const found = qt.find(gx, gy, 15 / xform.k);
-          if (found) {
-            if (found.mid !== activeMid) highlightMunicipio(found.mid);
-            const pos = this.posicionRelativa(event);
-            this.tooltip.set({ visible: true, texto: textoTooltip(found), x: pos.x, y: pos.y });
-          } else {
-            if (activeMid) highlightMunicipio(null);
-            this.tooltip.update(s => ({ ...s, visible: false }));
-          }
-        })
-        .on('mouseout', () => {
-          highlightMunicipio(null);
-          this.tooltip.update(s => ({ ...s, visible: false }));
-        })
-        .on('click', (event: MouseEvent) => {
-          const dx = event.clientX - mousedownXY[0];
-          const dy = event.clientY - mousedownXY[1];
-          if (Math.sqrt(dx * dx + dy * dy) > 5) return;
-          const xform = d3.zoomTransform(svg.node()!);
-          const [px, py] = d3.pointer(event);
-          const [gx, gy] = xform.invert([px, py]);
-          const found = qt.find(gx, gy, 15 / xform.k);
-          if (found) this.zonaSeleccionada.update(a => a === found.name ? null : found.name);
-        });
+      // Busca el municipio bajo el cursor: el quadtree da el centroide más
+      // cercano SIN límite de radio (a zoom alto un municipio mide cientos de
+      // píxeles en pantalla y el cursor puede estar lejos de su centroide,
+      // p.ej. cerca de un borde — un radio fijo en píxeles de pantalla lo
+      // dejaba sin encontrar nada). Ese candidato se confirma con
+      // isPointInPath sobre su Path2D real: barato (una sola llamada nativa)
+      // y geométricamente exacto a cualquier nivel de zoom.
+      const buscarMunicipio = (gx: number, gy: number): CentroidEntry | undefined => {
+        const candidato = qt.find(gx, gy);
+        if (!candidato) return undefined;
+        const p2d = path2DMap.get(candidato.mid);
+        return p2d && ctx.isPointInPath(p2d, gx, gy) ? candidato : undefined;
+      };
+
+      // Rect transparente encima de todo el SVG — captura todos los eventos.
+      // Registrado fuera de la zona de Angular: mousemove dispara este handler
+      // decenas de veces por segundo y, con miles de municipios en pantalla,
+      // dejar que cada uno disparase change detection era la causa del lag.
+      this.ngZone.runOutsideAngular(() => {
+        svg.append('rect')
+          .attr('class', 'municipios-overlay')
+          .attr('width', ancho).attr('height', alto)
+          .attr('fill', 'none')
+          .attr('pointer-events', 'all')
+          .style('cursor', 'pointer')
+          .on('mousedown', (event: MouseEvent) => {
+            mousedownXY = [event.clientX, event.clientY];
+          })
+          .on('mousemove', (event: MouseEvent) => {
+            const xform = d3.zoomTransform(svg.node()!);
+            const [px, py] = d3.pointer(event);
+            const [gx, gy] = xform.invert([px, py]);
+            const found = buscarMunicipio(gx, gy);
+            if (found) {
+              if (found.mid !== activeMid) highlightMunicipio(found.mid);
+              const pos = this.posicionRelativa(event);
+              this.mostrarTooltip(textoTooltip(found), pos.x, pos.y);
+            } else {
+              if (activeMid) highlightMunicipio(null);
+              this.ocultarTooltip();
+            }
+          })
+          .on('mouseout', () => {
+            highlightMunicipio(null);
+            this.ocultarTooltip();
+          })
+          .on('click', (event: MouseEvent) => {
+            const dx = event.clientX - mousedownXY[0];
+            const dy = event.clientY - mousedownXY[1];
+            if (Math.sqrt(dx * dx + dy * dy) > 5) return;
+            const xform = d3.zoomTransform(svg.node()!);
+            const [px, py] = d3.pointer(event);
+            const [gx, gy] = xform.invert([px, py]);
+            const found = buscarMunicipio(gx, gy);
+            if (found) this.ngZone.run(() => this.zonaSeleccionada.update(a => a === found.name ? null : found.name));
+          });
+      });
 
     } finally {
       this.cargando.set(false);
@@ -479,19 +590,21 @@ export class MapaComponent {
   private alHover(event: MouseEvent, d: { properties: PropiedadesRegion }, datos: Record<string, number>): void {
     const nombre = d.properties.name;
     const valor = datos[nombre];
-    const texto = valor != null ? `${nombre}: ${valor.toFixed(2)}M hab.` : nombre;
+    const texto = valor != null ? `${nombre}: ${this.formatPoblacionCompleta(valor)}` : nombre;
     const pos = this.posicionRelativa(event);
-    this.tooltip.set({ visible: true, texto, x: pos.x, y: pos.y });
+    this.mostrarTooltip(texto, pos.x, pos.y);
     d3.select(event.currentTarget as Element).attr('stroke', '#1a1a2e').attr('stroke-width', 1.5);
   }
 
   private alMover(event: MouseEvent): void {
     const pos = this.posicionRelativa(event);
-    this.tooltip.update(t => ({ ...t, x: pos.x, y: pos.y }));
+    const el = this.tooltipEl().nativeElement;
+    el.style.left = `${pos.x + 14}px`;
+    el.style.top = `${pos.y - 36}px`;
   }
 
   private alSalir(): void {
-    this.tooltip.update(t => ({ ...t, visible: false }));
+    this.ocultarTooltip();
     d3.selectAll<SVGPathElement, unknown>('.region').attr('stroke', '#fff').attr('stroke-width', 0.5);
   }
 

@@ -40,15 +40,7 @@
     </div>
   }
 
-  @if (tooltip().visible) {
-    <div
-      class="tooltip"
-      [style.left.px]="tooltip().x + 14"
-      [style.top.px]="tooltip().y - 36"
-    >
-      {{ tooltip().texto }}
-    </div>
-  }
+  <div #tooltipEl class="tooltip" style="display: none;"></div>
 </div>
 
 @if (zonaSeleccionada()) {
