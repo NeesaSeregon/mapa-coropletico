@@ -151,19 +151,34 @@ export class MapaComponent {
     ancho: number,
     alto: number,
     maxZoom: number,
-    alZoom?: (transform: d3.ZoomTransform) => void
+    alZoom?: (transform: d3.ZoomTransform) => void,
+    alZoomFin?: (transform: d3.ZoomTransform) => void
   ): {
     svg: d3.Selection<SVGSVGElement, unknown, null, undefined>;
     g: d3.Selection<SVGGElement, unknown, null, undefined>;
   } {
-    // El fondo océano ya no se pinta con un <rect> del SVG (eso taparía el
-    // canvas de municipios, que va debajo): lo pone el CSS de .mapa-contenedor.
+    // El fondo océano ya no se pinta con un <rect> del SVG: lo pone el CSS
+    // de .mapa-contenedor.
+    //
+    // position/display puestos aquí por .style() (no delegados a la regla
+    // ".mapa-contenedor svg" de mapa.scss): Angular reescribe esa regla con
+    // un atributo de scope (_ngcontent-xxx) para el view encapsulation, pero
+    // este <svg> lo crea D3 en tiempo de ejecución y nunca recibe ese
+    // atributo, así que la regla no le aplica nunca y el elemento se queda
+    // en position:static. Un position:static pinta SIEMPRE por debajo de
+    // cualquier elemento posicionado del mismo contexto de apilamiento —
+    // aquí el <canvas> (con su posición sí puesta por .style() en JS) —
+    // sin importar el orden en el DOM. Resultado: el canvas tapaba casi
+    // por completo las fronteras de municipio/provincia dibujadas en SVG.
     const svg = d3.select<HTMLDivElement, unknown>(el)
       .append<SVGSVGElement>('svg')
       .attr('width', '100%')
       .attr('height', '100%')
       .attr('viewBox', `0 0 ${ancho} ${alto}`)
-      .attr('preserveAspectRatio', 'xMidYMid meet');
+      .attr('preserveAspectRatio', 'xMidYMid meet')
+      .style('display', 'block')
+      .style('position', 'absolute')
+      .style('inset', '0');
 
     const g = svg.append('g');
 
@@ -172,7 +187,8 @@ export class MapaComponent {
       .on('zoom', (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => {
         g.attr('transform', event.transform.toString());
         alZoom?.(event.transform);
-      });
+      })
+      .on('end', (event: d3.D3ZoomEvent<SVGSVGElement, unknown>) => alZoomFin?.(event.transform));
 
     // Fuera de la zona de Angular: el zoom/pan dispara este handler en cada
     // frame y no toca ningún estado de Angular, solo el DOM del SVG.
@@ -346,12 +362,20 @@ export class MapaComponent {
       const pob = this.pobMunicipiosCache ?? {};
       const coleccion = topojson.feature(topo, topo.objects['municipalities']);
       const features = 'features' in coleccion ? coleccion.features : [];
-      const mallaProvincias = topojson.mesh(topo, topo.objects['provinces'], (a, b) => a !== b);
       const mallaMunicipios = topojson.mesh(topo, topo.objects['municipalities'], (a, b) => a !== b);
 
       if (!this.topoCache) {
         this.topoCache = await d3.json<TopoProvincias>('/assets/provinces.json') ?? null;
       }
+
+      // El objeto 'provinces' del topojson de municipios no comparte arcos
+      // entre provincias vecinas (se generó por separado del de municipios),
+      // así que topojson.mesh apenas encuentra bordes internos ahí y la malla
+      // sale casi vacía tras proyectar. provinces.json sí tiene esa topología
+      // correcta — es la misma fuente que ya usa la vista de Provincias.
+      const mallaProvincias = this.topoCache
+        ? topojson.mesh(this.topoCache, this.topoCache.objects['provinces'], (a, b) => a !== b)
+        : topojson.mesh(topo, topo.objects['provinces'], (a, b) => a !== b);
 
       const projection = geoConicConformalSpain();
       const fitTarget = this.topoCache
@@ -386,6 +410,17 @@ export class MapaComponent {
         .style('inset', '0')
         .style('pointer-events', 'none');
       const ctx = canvas.node()!.getContext('2d')!;
+
+      // Canvas fuera de pantalla que guarda el último render de calidad
+      // completa. Durante un gesto de zoom/pan no se vuelve a rasterizar
+      // (ver redibujarRapido); al terminar el gesto se refresca aquí.
+      const canvasCache = document.createElement('canvas');
+      canvasCache.width = ancho * dpr;
+      canvasCache.height = alto * dpr;
+      const ctxCache = canvasCache.getContext('2d')!;
+      let cacheTransform: d3.ZoomTransform = d3.zoomIdentity;
+      let cacheValido = false;
+
       const borderFeature = topojson.feature(topo, topo.objects['border']);
       const borderPath2D = new Path2D(path(borderFeature) ?? '');
 
@@ -426,8 +461,15 @@ export class MapaComponent {
         path2DMap.set(mid, new Path2D(dVal));
       }
 
-      /** Redibuja el canvas entero aplicando la transformación de zoom/pan actual. */
-      const redibujarCanvas = (transform: d3.ZoomTransform): void => {
+      /**
+       * Redibuja el canvas entero: recorre los ~8.213 Path2D y los rellena
+       * uno a uno. Caro (sobre todo con devicePixelRatio > 1, que multiplica
+       * los píxeles reales a rasterizar) — solo se llama al arrancar y al
+       * terminar un gesto de zoom/pan, nunca en mitad de uno. Cachea el
+       * resultado en canvasCache para que redibujarRapido() pueda reescalarlo
+       * como una imagen mientras el gesto está en marcha.
+       */
+      const redibujarCompleto = (transform: d3.ZoomTransform): void => {
         const nodo = canvas.node()!;
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -452,11 +494,44 @@ export class MapaComponent {
         }
         ctx.restore();
         ctx.restore();
+
+        ctxCache.setTransform(1, 0, 0, 1, 0, 0);
+        ctxCache.clearRect(0, 0, canvasCache.width, canvasCache.height);
+        ctxCache.drawImage(nodo, 0, 0);
+        cacheTransform = transform;
+        cacheValido = true;
+      };
+
+      /**
+       * Redibujado "en vivo" durante el gesto: en vez de rasterizar los
+       * 8.213 Path2D otra vez, reescala/traslada como una simple imagen
+       * (un único drawImage) el último render completo cacheado. Es la
+       * misma idea que usan los mapas de teselas (Leaflet, Google Maps):
+       * durante el gesto se ve una versión estirada del último frame nítido,
+       * y redibujarCompleto() la reemplaza por una versión nítida en cuanto
+       * el gesto termina (evento 'end' de d3-zoom).
+       */
+      const redibujarRapido = (transform: d3.ZoomTransform): void => {
+        if (!cacheValido) { redibujarCompleto(transform); return; }
+        const nodo = canvas.node()!;
+        const escala = transform.k / cacheTransform.k;
+        const offsetX = dpr * (transform.x - escala * cacheTransform.x);
+        const offsetY = dpr * (transform.y - escala * cacheTransform.y);
+
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, nodo.width, nodo.height);
+        ctx.drawImage(
+          canvasCache,
+          0, 0, canvasCache.width, canvasCache.height,
+          offsetX, offsetY, canvasCache.width * escala, canvasCache.height * escala
+        );
+        ctx.restore();
       };
 
       // d3-zoom dispara 'zoom' muchas veces durante un solo gesto; coalescemos
       // los redibujados a un máximo de uno por frame con requestAnimationFrame
-      // en vez de redibujar las 8.213 geometrías en cada evento.
+      // en vez de redibujar en cada evento.
       let transformPendiente: d3.ZoomTransform | null = null;
       let rafPendiente = false;
       const programarRedibujado = (transform: d3.ZoomTransform): void => {
@@ -465,12 +540,12 @@ export class MapaComponent {
         rafPendiente = true;
         requestAnimationFrame(() => {
           rafPendiente = false;
-          if (transformPendiente) redibujarCanvas(transformPendiente);
+          if (transformPendiente) redibujarRapido(transformPendiente);
         });
       };
 
-      const { svg, g } = this.crearSvgBase(el, ancho, alto, 40, programarRedibujado);
-      redibujarCanvas(d3.zoomIdentity);
+      const { svg, g } = this.crearSvgBase(el, ancho, alto, 40, programarRedibujado, redibujarCompleto);
+      redibujarCompleto(d3.zoomIdentity);
 
       // Bordes encima de los colores
       g.append('path').datum(mallaMunicipios)
@@ -479,7 +554,7 @@ export class MapaComponent {
 
       g.append('path').datum(mallaProvincias)
         .attr('fill', 'none').attr('stroke', '#fff')
-        .attr('stroke-width', 0.9).attr('pointer-events', 'none').attr('d', path);
+        .attr('stroke-width', 1.5).attr('pointer-events', 'none').attr('d', path);
 
       this.dibujarCosta(g, topo, path);
       this.dibujarBordesInset(g, projection);
